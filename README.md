@@ -14,6 +14,7 @@
 	"token":"yourApiToken",
 	"domains":{
 		"xxxx.xx":[
+		    "\@",
 			"www",
 			"aaa"
 		]
