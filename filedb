@@ -1,0 +1,629 @@
+#!/usr/bin/env bash
+set -eo pipefail; [[ $TRACE ]] && set -x
+
+readonly FILEDB_ROOT="${FILEDB_ROOT:-/var/lib/filedb}"
+readonly COMMAND_FUNCTION_PREFIX="filedb"
+readonly COMMAND_NAME="filedb"
+readonly COMMAND_VERSION=0.3.0
+
+readonly EX_OK=0
+readonly EX_USAGE=64        # command line usage error
+readonly EX_DATAERR=65      # data format error
+readonly EX_NOINPUT=66      # cannot open input
+readonly EX_NOUSER=7        # addressee unknown
+readonly EX_NOHOST=8        # host name unknown
+readonly EX_UNAVAILABLE=69  # service unavailable
+readonly EX_SOFTWARE=0      # internal software error
+readonly EX_OSERR=71        # system error (e.g., can't fork)
+readonly EX_OSFILE=2        # critical OS file missing
+readonly EX_CANTCREAT=73    # can't create (user) output file
+readonly EX_IOERR=74        # input/output error
+readonly EX_TEMPFAIL=5      # temp failure; user is invited to retry
+readonly EX_PROTOCOL=6      # remote error in protocol
+readonly EX_NOPERM=7        # permission denied
+readonly EX_CONFIG=8        # configuration error
+
+cmd-help() {
+  declare desc="Shows help information for a command"
+  declare args="$*"
+  if [[ "$args" ]]; then
+    for cmd; do true; done # last arg
+    local fn="$COMMAND_FUNCTION_PREFIX-$cmd"
+    fn-info "$fn" 1
+  fi
+}
+
+fn-args() {
+  declare desc="Inspect a function's arguments"
+  local argline
+  argline=$(type "$1" | grep declare | grep -v "declare desc" | head -1)
+  echo -e "${argline// /"\n"}" | awk -F= '/=/{print "<"$1">"}' | tr "\n" " "
+}
+
+fn-desc() {
+  declare desc="Inspect a function's description"
+  desc=""
+  eval "$(type "$1" | grep desc | head -1)"; echo $desc
+}
+
+fn-execute() {
+  declare desc="Executes a function retrieved via reflection"
+  declare CMD="$1"
+  local executed=false exit_code=1
+  shift 1
+
+  for fn in $(declare -F | grep -oEi "$COMMAND_FUNCTION_PREFIX-([a-z-]+)"); do
+    if [[ "$fn" == "$COMMAND_FUNCTION_PREFIX-$CMD" ]]; then
+      local UNIMPLEMENTED=false
+      eval "$(type "$fn" | grep UNIMPLEMENTED | head -1)";
+
+      if [[ "$UNIMPLEMENTED" == "false" ]]; then
+        local executed=true
+        $fn "$@"
+        exit_code="$?"
+      fi
+
+      break
+    fi
+  done
+
+  if [[ $executed == "false" ]]; then
+    log-fail "invalid command"
+    exit_code="1"
+  fi
+
+  return $exit_code
+}
+
+fn-help() {
+  declare desc="shows help information"
+  echo "$COMMAND_NAME $COMMAND_VERSION"
+  echo ""
+
+  for fn in $(declare -F | grep -oEi "$COMMAND_FUNCTION_PREFIX-([a-z-]+)"); do
+    local UNIMPLEMENTED=false
+    eval "$(type "$fn" | grep UNIMPLEMENTED | head -1)";
+    if [[ "$UNIMPLEMENTED" == "false" ]]; then
+      fn-info "$fn"
+    fi
+  done
+}
+
+fn-info() {
+  declare desc="Inspects a function"
+  declare fn="$1" showsource="$2"
+  local fn_name="${1//$COMMAND_FUNCTION_PREFIX-/}"
+  echo "$fn_name $(fn-args "$fn")"
+  echo "  $(fn-desc "$fn")"
+  echo
+  if [[ "$showsource" ]]; then
+    type "$fn" | tail -n +2
+    echo
+  fi
+}
+
+fn-unimplemented() {
+  declare desc="outputs unimplemented methods"
+  local fn
+
+  echo "$COMMAND_NAME unimplemented functions:"
+  echo ""
+  for fn in $(declare -F | grep -oEi "$COMMAND_FUNCTION_PREFIX-([a-z-]+)"); do
+    local UNIMPLEMENTED=false
+    eval "$(type "$fn" | grep UNIMPLEMENTED | head -1)";
+
+    if [[ "$UNIMPLEMENTED" == "true" ]]; then
+      echo "  $fn"
+    fi
+  done
+  return 0
+}
+
+log-fail() {
+  declare desc="log fail formatter"
+  echo "$@" 1>&2
+}
+
+log-verbose() {
+  declare desc="log verbose formatter"
+  if [[ ! -z "$FILEDB_VERBOSE_OUTPUT" ]]; then
+    echo "$@"
+  fi
+}
+
+filedb-blank() {
+  declare desc="blanks a key from a domain"
+  declare DOMAIN="$1" KEY="$2"
+  local DOMAIN_PATH="$FILEDB_ROOT/$DOMAIN"
+  local KEY_PATH="$DOMAIN_PATH/$KEY"
+
+  if [[ -z "$DOMAIN" ]]; then
+    log-fail "no domain specified"
+    return "$EX_USAGE"
+  fi
+
+  if [[ -z "$KEY" ]]; then
+    log-fail "no key specified"
+    return "$EX_USAGE"
+  fi
+
+  if [[ ! -d "$DOMAIN_PATH" ]]; then
+    log-verbose "invalid domain path"
+    return 0
+  fi
+
+  if [[ ! -f "$KEY_PATH" ]]; then
+    log-verbose "invalid key path"
+    return 0
+  fi
+
+  filedb-set "$DOMAIN" "$KEY" ""
+  return $?
+}
+
+filedb-del() {
+  declare desc="delete key from domain"
+  declare DOMAIN="$1" KEY="$2"
+  local DOMAIN_PATH="$FILEDB_ROOT/$DOMAIN"
+  local KEY_PATH="$DOMAIN_PATH/$KEY"
+
+  if [[ -z "$DOMAIN" ]]; then
+    log-fail "no domain specified"
+    return "$EX_USAGE"
+  fi
+
+  if [[ -z "$KEY" ]]; then
+    log-fail "no key specified"
+    return "$EX_USAGE"
+  fi
+
+  if [[ ! -d "$DOMAIN_PATH" ]]; then
+    log-verbose "invalid domain path"
+    return 0
+  fi
+
+  if ! rm -f "$KEY_PATH" 2>/dev/null; then
+    log-fail "unable to remove the key"
+    return "$EX_NOPERM"
+  fi
+
+  return 0
+}
+
+filedb-exists() {
+  declare desc="determine if a key exists in a domain"
+  declare DOMAIN="$1" KEY="$2"
+  local DOMAIN_PATH="$FILEDB_ROOT/$DOMAIN"
+  local KEY_PATH="$DOMAIN_PATH/$KEY"
+
+  if [[ -z "$DOMAIN" ]]; then
+    log-fail "no domain specified"
+    return "$EX_USAGE"
+  fi
+
+  if [[ -z "$KEY" ]]; then
+    log-fail "no key specified"
+    return "$EX_USAGE"
+  fi
+
+  if [[ ! -f "$KEY_PATH" ]]; then
+    log-fail "key path $KEY_PATH does not exist"
+    return "$EX_UNAVAILABLE"
+  fi
+
+  return 0
+}
+
+filedb-get() {
+  declare desc="gets a key from a domain"
+  declare DOMAIN="$1" KEY="$2"
+  local DOMAIN_PATH="$FILEDB_ROOT/$DOMAIN"
+  local KEY_PATH="$DOMAIN_PATH/$KEY"
+
+  if [[ -z "$DOMAIN" ]]; then
+    log-fail "no domain specified"
+    return "$EX_USAGE"
+  fi
+
+  if [[ -z "$KEY" ]]; then
+    log-fail "no key specified"
+    return "$EX_USAGE"
+  fi
+
+  if [[ ! -f "$KEY_PATH" ]]; then
+    log-verbose "invalid key path"
+    return 0
+  fi
+
+  cat "$KEY_PATH"
+  return 0
+}
+
+filedb-set() {
+  declare desc="sets a key to a value in a domain"
+  declare DOMAIN="$1" KEY="$2" VALUE="$3"
+  local DOMAIN_PATH="$FILEDB_ROOT/$DOMAIN"
+  local KEY_PATH="$DOMAIN_PATH/$KEY"
+
+  if [[ -z "$DOMAIN" ]]; then
+    log-fail "no domain specified"
+    return "$EX_USAGE"
+  fi
+
+  if [[ -z "$KEY" ]]; then
+    log-fail "no key specified"
+    return "$EX_USAGE"
+  fi
+
+  if ! mkdir -p "$DOMAIN_PATH" 2>/dev/null; then
+    log-fail "unable to create the domain at $DOMAIN_PATH"
+    return "$EX_UNAVAILABLE"
+  fi
+
+  touch "$KEY_PATH" || true
+  if [[ ! -f "$KEY_PATH" ]]; then
+    log-fail "key path $KEY_PATH does not exist"
+    return "$EX_UNAVAILABLE"
+  fi
+
+  echo "$VALUE" > "$KEY_PATH"
+  log-verbose "wrote value to $KEY_PATH: $VALUE"
+  return 0
+}
+
+filedb-set-from-file() {
+  declare desc="reads in a file to set a key to a value in a domain"
+  declare DOMAIN="$1" KEY="$2" FILENAME="$3"
+  local VALUE
+
+  if [[ ! -f "$FILENAME" ]]; then
+    return "$EX_IOERR"
+  fi
+
+  VALUE=$(cat "$FILENAME")
+  filedb-set "$DOMAIN" "$KEY" "$VALUE"
+  return $?
+}
+
+filedb-flush-domain() {
+  declare desc="removes all keys from a domain"
+  declare DOMAIN="$1"
+  local DOMAIN_PATH="$FILEDB_ROOT/$DOMAIN"
+
+  if [[ -z "$DOMAIN" ]]; then
+    log-fail "no domain specified"
+    return "$EX_USAGE"
+  fi
+
+  if [[ ! -d "$DOMAIN_PATH" ]]; then
+    log-verbose "invalid domain path"
+    return 0
+  fi
+
+  # shellcheck disable=SC2115
+  # shellcheck disable=SC2086
+  if ! rm -rf $DOMAIN_PATH/* ; then
+    log-fail "unable to remove the domain"
+    return "$EX_NOPERM"
+  fi
+
+  return 0
+}
+
+filedb-lindex() {
+  declare desc="get an element from a list by index"
+  declare DOMAIN="$1" KEY="$2" INDEX="$3"
+
+  local DOMAIN_PATH="$FILEDB_ROOT/$DOMAIN"
+  local KEY_PATH="$DOMAIN_PATH/$KEY"
+  local value
+  local count
+
+  if [[ -z "$DOMAIN" ]]; then
+    log-fail "no domain specified"
+    return "$EX_USAGE"
+  fi
+
+  if [[ -z "$KEY" ]]; then
+    log-fail "no key specified"
+    return "$EX_USAGE"
+  fi
+
+  if [[ ! -f "$KEY_PATH" ]]; then
+    log-verbose "invalid key path"
+    return 0
+  fi
+
+  value=$(cat "$KEY_PATH")
+  count=$(wc -l "$KEY_PATH" | cut -d' ' -f1)
+
+  if [[ "$INDEX" -lt 0 ]]; then
+    INDEX=$((count + INDEX))
+  fi
+
+  if [[ "$INDEX" -lt 0 ]] || [[ "$INDEX" -gt "$count" ]]; then
+    log-verbose "invalid index"
+    return 0
+  fi
+
+  INDEX=$((INDEX + 1))
+  echo "$value" | sed "${INDEX}q;d"
+  return 0
+}
+
+filedb-linsert() {
+  declare desc="insert an element before or after another element in a list"
+  # shellcheck disable=SC2034
+  declare DOMAIN="$1" BEFORE_AFTER="$2" PIVOT="$3" VALUE="$4"
+  declare UNIMPLEMENTED=true
+}
+
+filedb-llen() {
+  declare desc="get the length of a list"
+  declare DOMAIN="$1" KEY="$2"
+
+  local DOMAIN_PATH="$FILEDB_ROOT/$DOMAIN"
+  local KEY_PATH="$DOMAIN_PATH/$KEY"
+
+  if [[ -z "$DOMAIN" ]]; then
+    log-fail "no domain specified"
+    return "$EX_USAGE"
+  fi
+
+  if [[ -z "$KEY" ]]; then
+    log-fail "no key specified"
+    return "$EX_USAGE"
+  fi
+
+  if [[ ! -f "$KEY_PATH" ]]; then
+    log-verbose "invalid key path"
+    return 0
+  fi
+
+  wc -l "$KEY_PATH" | cut -d' ' -f1
+  return 0
+}
+
+filedb-lpop() {
+  declare desc="remove and get the first element in a list"
+  declare DOMAIN="$1" KEY="$2"
+
+  local DOMAIN_PATH="$FILEDB_ROOT/$DOMAIN"
+  local KEY_PATH="$DOMAIN_PATH/$KEY"
+  local LENGTH
+
+  if [[ -z "$DOMAIN" ]]; then
+    log-fail "no domain specified"
+    return "$EX_USAGE"
+  fi
+
+  if [[ -z "$KEY" ]]; then
+    log-fail "no key specified"
+    return "$EX_USAGE"
+  fi
+
+  if [[ ! -f "$KEY_PATH" ]]; then
+    log-verbose "invalid key path"
+    return 0
+  fi
+
+  LENGTH="$(filedb-llen "$DOMAIN" "$KEY")"
+  if [[ "$LENGTH" -gt 0 ]]; then
+    head -n 1 "$KEY_PATH"
+  fi
+  if [[ "$LENGTH" == "" ]] || [[ "$LENGTH" -eq 0 ]] || [[ "$LENGTH" -eq 1 ]]; then
+    rm -f "$KEY_PATH"
+    touch "$KEY_PATH" || true
+  else
+    # shellcheck disable=SC2005
+    # shellcheck disable=SC2094
+    echo "$(tail -n +2 "$KEY_PATH")" > "$KEY_PATH"
+  fi
+  return 0
+}
+
+filedb-lpush() {
+  declare desc="prepend one or multiple values to a list"
+  declare DOMAIN="$1" KEY="$2" VALUES=("${@:3}")
+
+  local DOMAIN_PATH="$FILEDB_ROOT/$DOMAIN"
+  local KEY_PATH="$DOMAIN_PATH/$KEY"
+
+  if [[ -z "$DOMAIN" ]]; then
+    log-fail "no domain specified"
+    return "$EX_USAGE"
+  fi
+
+  if [[ -z "$KEY" ]]; then
+    log-fail "no key specified"
+    return "$EX_USAGE"
+  fi
+
+  if ! mkdir -p "$DOMAIN_PATH" 2>/dev/null; then
+    log-fail "unable to create the domain at $DOMAIN_PATH"
+    return "$EX_UNAVAILABLE"
+  fi
+
+  LPUSH_TMP_WORK_DIR=$(mktemp -d)
+  LPUSH_TMP_FILE="${LPUSH_TMP_WORK_DIR}/"$(mktemp -u "lpush.key.XXXXXX")
+  trap 'rm -rf $LPUSH_TMP_WORK_DIR $LPUSH_TMP_FILE > /dev/null' RETURN INT TERM EXIT
+
+  touch "$KEY_PATH" || true
+  local VALUE
+  for VALUE in "${VALUES[@]}"; do
+    echo "$VALUE" >> "$LPUSH_TMP_FILE"
+  done
+  cat "$KEY_PATH" >> "$LPUSH_TMP_FILE"
+  cp -f "$LPUSH_TMP_FILE" "$KEY_PATH"
+  wc -l "$KEY_PATH" | cut -d' ' -f1
+
+  return 0
+}
+
+filedb-lrem() {
+  declare desc="remove elements from a list"
+  # shellcheck disable=SC2034
+  declare DOMAIN="$1" KEY="$2" COUNT="$3" VALUE="$4"
+  declare UNIMPLEMENTED=true
+}
+
+filedb-lset() {
+  declare desc="set the value of an element in a list by its index"
+  declare DOMAIN="$1" KEY="$2" INDEX="$3" VALUE="$4"
+  local count i LSET_TMP_WORK_DIR LSET_TMP_FILE
+  local DOMAIN_PATH="$FILEDB_ROOT/$DOMAIN"
+  local KEY_PATH="$DOMAIN_PATH/$KEY"
+
+   if [[ -z "$DOMAIN" ]]; then
+    log-fail "no domain specified"
+    return "$EX_USAGE"
+  fi
+
+  if [[ -z "$KEY" ]]; then
+    log-fail "no key specified"
+    return "$EX_USAGE"
+  fi
+
+  if [[ ! -f "$KEY_PATH" ]]; then
+    log-fail "no such key"
+    return "$EX_IOERR"
+  fi
+
+  count=$(wc -l "$KEY_PATH" | cut -d' ' -f1)
+  if [[ "$INDEX" -lt 0 ]] || [[ "$INDEX" -gt "$count" ]]; then
+    log-fail "index out of range"
+    return "$EX_USAGE"
+  fi
+
+  LSET_TMP_WORK_DIR=$(mktemp -d)
+  LSET_TMP_FILE="${LSET_TMP_WORK_DIR}/"$(mktemp -u "lset.key.XXXXXX")
+  trap 'rm -rf $LSET_TMP_WORK_DIR $LSET_TMP_FILE > /dev/null' RETURN INT TERM EXIT
+
+  i=0
+  while read -r L; do
+    if [[ "$i" == "$INDEX" ]]; then
+      echo "$VALUE"
+    else
+      echo "$L"
+    fi
+    ((i++))
+  done  < "$KEY_PATH" > "$LSET_TMP_FILE"
+
+  cp -f "$LSET_TMP_FILE" "$KEY_PATH"
+  return 0
+}
+
+filedb-rpop() {
+  declare desc="remove and get the last element in a list"
+  declare DOMAIN="$1" KEY="$2"
+
+  local DOMAIN_PATH="$FILEDB_ROOT/$DOMAIN"
+  local KEY_PATH="$DOMAIN_PATH/$KEY"
+
+   if [[ -z "$DOMAIN" ]]; then
+    log-fail "no domain specified"
+    return "$EX_USAGE"
+  fi
+
+  if [[ -z "$KEY" ]]; then
+    log-fail "no key specified"
+    return "$EX_USAGE"
+  fi
+
+  if [[ ! -f "$KEY_PATH" ]]; then
+    log-verbose "invalid key path"
+    return 0
+  fi
+
+  tail -n 1 "$KEY_PATH"
+  LENGTH="$(filedb-llen "$DOMAIN" "$KEY")"
+  if [[ "$LENGTH" == "" ]] || [[ "$LENGTH" -eq 0 ]] || [[ "$LENGTH" -eq 1 ]]; then
+    rm -f "$KEY_PATH"
+    touch "$KEY_PATH" || true
+  else
+    # shellcheck disable=SC2005
+    # shellcheck disable=SC2094
+    echo "$(head -n -1 "$KEY_PATH")" > "$KEY_PATH"
+  fi
+  return 0
+}
+
+filedb-rpush() {
+  declare desc="append one or multiple values to a list"
+  declare DOMAIN="$1" KEY="$2" VALUES=("${@:3}")
+
+  local DOMAIN_PATH="$FILEDB_ROOT/$DOMAIN"
+  local KEY_PATH="$DOMAIN_PATH/$KEY"
+
+  if [[ -z "$DOMAIN" ]]; then
+    log-fail "no domain specified"
+    return "$EX_USAGE"
+  fi
+
+  if [[ -z "$KEY" ]]; then
+    log-fail "no key specified"
+    return "$EX_USAGE"
+  fi
+
+  if ! mkdir -p "$DOMAIN_PATH" 2>/dev/null; then
+    log-fail "unable to create the domain at $DOMAIN_PATH"
+    return "$EX_UNAVAILABLE"
+  fi
+
+  touch "$KEY_PATH" || true
+  local VALUE
+  for VALUE in "${VALUES[@]}"; do
+    echo -e "$VALUE" >> "$KEY_PATH"
+  done
+  wc -l "$KEY_PATH" | cut -d' ' -f1
+  return 0
+}
+
+main() {
+  declare desc="main input function"
+  declare CMD="$1"
+  local exit_code=1
+
+  if [[ -z "$1" ]]; then
+    fn-help
+    exit 0
+  fi
+
+  shift 1
+
+  set +e;
+  case "$CMD" in
+    unimplemented)
+      fn-unimplemented "$@"
+      exit_code=$?
+      ;;
+
+    help)
+      if [[ -z $1 ]]; then
+        fn-help
+        exit_code=$?
+      else
+        cmd-help "$@"
+        exit_code=$?
+      fi
+      ;;
+
+    -v|--version|version)
+      echo "$FILEDB_VERSION"
+      exit_code=$?
+      ;;
+
+    *)
+      fn-execute "$CMD" "$@"
+      exit_code=$?
+      ;;
+  esac
+  set -e
+
+  if [[ "$exit_code" -ne "$EX_OK" ]]; then
+    exit $exit_code
+  fi
+  exit 0
+}
+
+main "$@"

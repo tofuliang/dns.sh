@@ -1,0 +1,14 @@
+{
+	"token":"yourApiToken",
+	"domains":{
+		"xxxx.xx":[
+			"www",
+			"aaa"
+		]
+	},
+	"ips":{
+		"ip-chinanet":"ifconfig |grep inet|grep netmask|grep 192|awk '{print $2}'",
+		"ip-chinamobile":"ifconfig |grep inet|grep netmask|grep 10|awk '{print $2}'",
+		"ip-chinaunicom":"ifconfig |grep inet|grep netmask|grep 12|awk '{print $2}'"
+	}
+}
