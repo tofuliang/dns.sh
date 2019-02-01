@@ -92,7 +92,7 @@ domainInit() {
 
 		local subDomains=$(jq '.domains."'${domain}'"' $DIR/dns.json);
 		local subDomainCount=$(jq '.domains."'${domain}'"|length-1' $DIR/dns.json);
-		local domainInfo=$(apiPost Domain.List "domain=${domain}"|jq ".domains[0]")
+		local domainInfo=$(apiPost Domain.List "keyword=${domain}"|jq ".domains[0]")
 		local domainId=$(echo $domainInfo|jq ".id" );
 		filedb set "$domain" "domainId" "${domainId}"
 		local records=$(apiPost Record.List "domain_id=${domainId}&record_type=A"|jq ".records")
