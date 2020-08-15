@@ -1,5 +1,16 @@
 #!/usr/bin/env bash
 
+token=""
+domains=""
+ipCount="0"
+domainCount="0"
+remarks=""
+reInit="1"
+debugLevel="0"
+
+export FILEDB_ROOT="/tmp/Dns.sh_Cache"
+[ ! -d ${FILEDB_ROOT} ] && mkdir -p $FILEDB_ROOT
+
 # Get script dir
 # See: http://stackoverflow.com/a/29835459/4449544
 rreadlink() ( # Execute the function in a *subshell* to localize variables and the effect of `cd`.
@@ -49,21 +60,12 @@ rreadlink() ( # Execute the function in a *subshell* to localize variables and t
 )
 
 DIR=$(dirname -- "$(rreadlink "$0")")
-token=""
-domains=""
-ipCount="0"
-domainCount="0"
-remarks=""
-reInit="false"
-
-export FILEDB_ROOT="/tmp/Dns.sh_Cache"
 export PATH=$PATH:$DIR
 
-[ ! -d ${FILEDB_ROOT} ] && mkdir -p $FILEDB_ROOT
 # Get data
 # arg: type data
 apiPost() {
-	local agent="shellDdns/0.1(tofuliang@gmail.com)"
+	local agent="shellDdns/0.2(tofuliang@gmail.com)"
 	local inter="https://dnsapi.cn/${1:?'Info.Version'}"
 	local param="login_token=${token}&format=json&${2}"
 
@@ -75,80 +77,90 @@ trimQuotes(){
 }
 
 domainInit() {
-	reInit="false"
-	token=$(trimQuotes $(jq .token $DIR/dns.json));
-	domains=$(jq '.domains|keys_unsorted' $DIR/dns.json);
-	ipCount=$(jq '.ips|length' $DIR/dns.json);
-	domainCount=$(echo $domains|jq '.|length-1');
-	remarks=$(jq '.ips|keys_unsorted' $DIR/dns.json);
+	reInit=$(( $reInit - 1 ));
 
-	for index in `seq 0 ${domainCount}`;do
-		local domain=$(trimQuotes $(echo $domains|jq '.['$index']' ));
-		local cacheTime="0"$(filedb get "$domain" "cache_time")
-		if [ $cacheTime -gt 0 ];then
-			echo "DNS Info Cached.";
-			return 0
-		fi
+	if [ $reInit -eq 0 ];then
+		[ $debugLevel -gt 1 ] && echo 'doing real domainInit ...'
+		token=$(trimQuotes $(jq .token $DIR/dns.json));
+		domains=$(jq '.domains|keys_unsorted' $DIR/dns.json);
+		ipCount=$(jq '.ips|length' $DIR/dns.json);
+		domainCount=$(echo $domains|jq '.|length-1');
+		remarks=$(jq '.ips|keys_unsorted' $DIR/dns.json);
 
-		local subDomains=$(jq '.domains."'${domain}'"' $DIR/dns.json);
-		local subDomainCount=$(jq '.domains."'${domain}'"|length-1' $DIR/dns.json);
-		local domainInfo=$(apiPost Domain.List "keyword=${domain}"|jq ".domains[0]")
-		local domainId=$(echo $domainInfo|jq ".id" );
-		filedb set "$domain" "domainId" "${domainId}"
-		local records=$(apiPost Record.List "domain_id=${domainId}&record_type=A"|jq ".records")
-		local recordCount=$(echo $records|jq '.|length-1');
-		for subDomainIndex in `seq 0 $subDomainCount`;do
-			local subDomain=$(trimQuotes $(jq '.domains."'${domain}'"['$subDomainIndex']' $DIR/dns.json))
-			for recordindex in `seq 0 $recordCount`;do
-				local recordDomain=$(trimQuotes $(echo $records|jq '.['$recordindex'].name'));
-				if [ "$recordDomain" =  "$subDomain" ];then
-					local domainInfo=$(echo $records|jq -c '.['$recordindex']')
-					local subDomainRemark=$(trimQuotes $(jq '.remark' <<<$domainInfo ));
-					local recordId=$(trimQuotes $(jq '.id' <<<$domainInfo ));
-					filedb lpush "$domain" "_$subDomain" "$domainInfo"
-					if [ "$subDomainRemark" = "" ];then
-						local _subDomainIndex=$(( $(filedb llen $domain _$subDomain) - 1 ));
-						local remark=$(trimQuotes $(jq '.['${_subDomainIndex}']' <<<${remarks} ));
-						updateRemark "$domainId" "$recordId" "$remark"
-						domainInfo=$(apiPost Record.Info "domain_id=${domainId}&record_id=${recordId}"|jq -c ".record"|sed 's/sub_domain/name/'|sed 's/record_//g' )
-						filedb lpop "$domain" "_$subDomain"
-						filedb lpush "$domain" "_$subDomain" "$domainInfo"
-					fi
-				fi
-			done
-			local subDomainMissIngCount=$(( $ipCount - $(( $(filedb llen "$domain" "_$subDomain") + 0 )) ));
-			if [ ${subDomainMissIngCount} -gt "0" ];then
-				for i in `seq 1 ${ipCount}`;do
-					local remarkIndex=$(( $i - 1 ));
-					local remark=$(trimQuotes $(jq '.['${remarkIndex}']' <<<${remarks} ));
-					local c=$(filedb get "$domain" "_$subDomain"|grep \"remark\":\"${remark}\"|wc -l)
-					if [ "0" = "${c}" ];then
-						addRecord "$domainId" "$subDomain" "$remark"
-						subDomainMissIngCount=$(( $subDomainMissIngCount - 1 ));
-					fi
-				done;
-				
-				if [ ${subDomainMissIngCount} -eq "0" ];then
-					filedb flush-domain "$domain"
-				fi
+		for index in `seq 0 ${domainCount}`;do
+			local domain=$(trimQuotes $(echo $domains|jq '.['$index']' ));
+			local cacheTime="0"$(filedb get "$domain" "cache_time")
+			if [ $cacheTime -gt 0 ] && [ `date -r $DIR/dns.json +%s` -lt $cacheTime ];then
+				echo "DNS Info Cached.";
+				return 0
 			fi
+
+			local subDomains=$(jq '.domains."'${domain}'"' $DIR/dns.json);
+			local subDomainCount=$(jq '.domains."'${domain}'"|length-1' $DIR/dns.json);
+			local domainInfo=$(apiPost Domain.List "keyword=${domain}"|jq ".domains[0]")
+			local domainId=$(echo $domainInfo|jq ".id" );
+			[ "0${domainId}" != "0" ] && filedb set "$domain" "domainId" "${domainId}"
+			local records=$(apiPost Record.List "domain_id=${domainId}&record_type=A"|jq ".records")
+			local recordCount=$(echo $records|jq '.|length-1');
+			for subDomainIndex in `seq 0 $subDomainCount`;do
+				local subDomain=$(trimQuotes $(jq '.domains."'${domain}'"['$subDomainIndex']' $DIR/dns.json))
+				local subDomainReg=0
+				for recordindex in `seq 0 $recordCount`;do
+					local recordDomain=$(trimQuotes $(echo $records|jq '.['$recordindex'].name'));
+					if [ "$recordDomain" =  "$subDomain" ];then
+						subDomainReg=1
+						echo "caching $subDomain ..."
+						local domainInfo=$(echo $records|jq -c '.['$recordindex']')
+						local subDomainRemark=$(trimQuotes $(jq '.remark' <<<$domainInfo ));
+						local recordId=$(trimQuotes $(jq '.id' <<<$domainInfo ));
+						[ "0${domainInfo}" != "0" ] && filedb lpush "$domain" "_$subDomain" "$domainInfo" >/dev/null 2>&1
+						if [ "$subDomainRemark" = "" ];then
+							local _subDomainIndex=$(( $(filedb llen $domain _$subDomain) - 1 ));
+							local remark=$(trimQuotes $(jq '.['${_subDomainIndex}']' <<<${remarks} ));
+							updateRemark "$domainId" "$recordId" "$remark"
+							domainInfo=$(apiPost Record.Info "domain_id=${domainId}&record_id=${recordId}"|jq -c ".record"|sed 's/sub_domain/name/'|sed 's/record_//g' )
+							filedb lpop "$domain" "_$subDomain"
+							[ "0${domainInfo}" != "0" ] && filedb lpush "$domain" "_$subDomain" "$domainInfo" >/dev/null 2>&1
+						fi
+					fi
+				done
+
+				local subDomainMissIngCount=$(( $ipCount - $(( $(filedb llen "$domain" "_$subDomain") + 0 )) ));
+				if [ ${subDomainMissIngCount} -gt "0" ] || [ $subDomainReg -eq 0 ];then
+					for i in `seq 1 ${ipCount}`;do
+						local remarkIndex=$(( $i - 1 ));
+						local remark=$(trimQuotes $(jq '.['${remarkIndex}']' <<<${remarks} ));
+						local c=$(filedb get "$domain" "_$subDomain"|grep \"remark\":\"${remark}\"|wc -l|grep -Eo "[0-9]+")
+						if [ "0" = "${c}" ];then
+							addRecord "$domainId" "$subDomain" "$remark"
+							subDomainMissIngCount=$(( $subDomainMissIngCount - 1 ));
+						fi
+					done;
+
+					if [ ${subDomainMissIngCount} -eq "0" ];then
+						filedb flush-domain "$domain"
+					fi
+				fi
+			done;
+
 		done;
-		if [ "$reInit" = "true" ]; then
-			domainInit
-		fi
-		filedb set "$domain" "cache_time" "`date +%s`"
-		echo "making DNS Info Cache."
-	done;
+		[ $debugLevel -gt 1 ] && echo 'real domainInit done.'
+	fi
+	if [ $reInit -gt 0 ]; then
+		domainInit
+	fi
+	filedb set "$domain" "cache_time" "`date +%s`"
+	echo "making DNS Info Cache."
 }
 
 addRecord() {
 	local response
-	reInit="true"
-	echo "addRecord...";
+	reInit=$(( $reInit + 1 ));
+	echo "addRecord ${2} ...";
 	local ip=$( eval $(jq -r '.ips["'${3}'"]' $DIR/dns.json ))
-	echo "domain_id=${1}&sub_domain=${2}&record_type=A&record_line=默认&value=${ip}"
+	[ $debugLevel -gt 0 ] && echo "domain_id=${1}&sub_domain=${2}&record_type=A&record_line=默认&value=${ip}"
 	local response=$(apiPost Record.Create "domain_id=${1}&sub_domain=${2}&record_type=A&record_line=默认&value=${ip}")
-	echo $response
+	[ $debugLevel -gt 1 ] && echo $response|jq
 	local recordId=$(trimQuotes $(jq '.record.id' <<<$response ));
 	updateRemark "${1}" "$recordId" "$3"
 	echo ""
@@ -156,47 +168,64 @@ addRecord() {
 
 updateRemark() {
 	local response
-	echo "updateRemark...";
-	echo "domain_id=${1}&record_id=${2}&remark=${3}"
+	echo "updateRemark recordId: ${2} ...";
+	[ $debugLevel -gt 0 ] && echo "domain_id=${1}&record_id=${2}&remark=${3}"
 	local response=$(apiPost Record.Remark "domain_id=${1}&record_id=${2}&remark=${3}")
-	echo ${response}
+	[ $debugLevel -gt 1 ] && echo ${response}|jq
 	echo ""
 }
 
 updateDomain() {
 	local response
-	echo "updateDomain...";
-	echo "domain_id=${1}&record_id=${2}&record_type=A&value=${3}&record_line=默认&sub_domain=${4}";
+	echo "updateDomain ${4} ...";
+	[ $debugLevel -gt 0 ] && echo "domain_id=${1}&record_id=${2}&record_type=A&value=${3}&record_line=默认&sub_domain=${4}";
 	local response=$(apiPost "Record.Modify" "domain_id=${1}&record_id=${2}&record_type=A&value=${3}&record_line=默认&sub_domain=${4}")
-	echo ${response}
+	[ $debugLevel -gt 1 ] && echo ${response}|jq
 	echo ""
 }
 
 checkDns() {
 	for index in `seq 0 ${domainCount}`;do
+		[ $debugLevel -gt 1 ] && echo "domainCount-> $index"
 		local domain=$(trimQuotes $(echo $domains|jq '.['$index']' ));
 		local subDomains=$(jq '.domains."'${domain}'"' $DIR/dns.json);
 		local subDomainCount=$(jq '.domains."'${domain}'"|length-1' $DIR/dns.json);
 		local domainId=$(filedb get "$domain" "domainId")
 
 		for subDomainIndex in `seq 0 $subDomainCount`;do
+			[ $debugLevel -gt 1 ] && echo "subDomainCount-> $subDomainIndex"
 			local subDomain=$(trimQuotes $(jq '.domains."'${domain}'"['$subDomainIndex']' $DIR/dns.json))
 			for subDomainCacheIndex in `seq 0 $(( $(filedb llen "$domain" "_$subDomain") -1 ))`;do
+				[ $debugLevel -gt 1 ] && echo "subDomainCacheIndex-> $subDomainCacheIndex"
 				local subDomainCache=$(filedb lindex "$domain" "_${subDomain}" "${subDomainCacheIndex}")
 				local cacheIp=$(trimQuotes $(jq '.value' <<<$subDomainCache ));
 				local remark=$(trimQuotes $(jq '.remark' <<<$subDomainCache ));
 				local recordId=$(trimQuotes $(jq '.id' <<<$subDomainCache ));
+				[ $debugLevel -gt 1 ] && echo "subDomainCache " && echo $subDomainCache|jq
 				local ip=$( eval $(jq -r '.ips["'${remark}'"]' $DIR/dns.json ))
+#				local ip='1.2.2.1'
 				if [ "0${ip}" != "0${cacheIp}" ];then
 					updateDomain "${domainId}" "${recordId}"  "${ip}" "${subDomain}"					
 					local domainInfo=$(apiPost Record.Info "domain_id=${domainId}&record_id=${recordId}"|jq -c ".record"|sed 's/sub_domain/name/'|sed 's/record_//g' )
-					filedb lset "$domain" "_$subDomain" "${subDomainCacheIndex}" "$domainInfo";	
+					[ "0${domainInfo}" != "0" ] && filedb lset "$domain" "_$subDomain" "${subDomainCacheIndex}" "$domainInfo";
 				fi
 			done
 		done;
 	done;
 	echo "checkDns Done.";
 }
+
+for arg in $@ ; do
+	if [[ "$arg" == "-v" ]]; then
+			debugLevel=1;
+	fi
+	if [[ "$arg" == "-vv" ]]; then
+				debugLevel=2;
+	fi
+done
+
+echo "debugLevel-> $debugLevel"
+echo ""
 
 domainInit
 checkDns
